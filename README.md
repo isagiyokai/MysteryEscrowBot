@@ -24,4 +24,4 @@ A Telegram bot for managing Solana-based escrow of username deals.
 
 ## License
 
-MIT
+MIT"# MysteryEscrowBot" 
