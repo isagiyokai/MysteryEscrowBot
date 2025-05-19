@@ -4,14 +4,20 @@ const Redis = require("ioredis");
 const { verifySolanaPayment } = require("./utils/solana");
 const fs = require("fs");
 
+// Initialize Telegram bot
 const bot = new TelegramBot(process.env.TG_TOKEN, { polling: true });
-const redis = new Redis(process.env.REDIS_URL);
 
-// Handle Redis connection errors globally
+// Connect to Redis (Upstash TLS)
+const redis = new Redis(process.env.REDIS_URL, {
+  tls: { rejectUnauthorized: false }
+});
+
+// Handle Redis connection errors
 redis.on("error", (err) => {
   console.error("Redis error:", err);
 });
 
+// /payme command: verifies Solana transaction and stores deal
 bot.onText(/\/payme (.+) @(\w+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const txHash = match[1];
@@ -28,8 +34,11 @@ bot.onText(/\/payme (.+) @(\w+)/, async (msg, match) => {
 
     const sellerShare = (0.8 * amount).toFixed(4);
 
-    // Store deal info safely with error handling
-    await redis.set(`deal:${chatId}`, JSON.stringify({ txHash, seller, amount }));
+    // Store deal in Redis
+    await redis.set(
+      `deal:${chatId}`,
+      JSON.stringify({ txHash, seller, amount })
+    );
 
     await bot.sendMessage(
       chatId,
@@ -37,10 +46,14 @@ bot.onText(/\/payme (.+) @(\w+)/, async (msg, match) => {
     );
   } catch (error) {
     console.error("Error in /payme handler:", error);
-    bot.sendMessage(chatId, "❌ An error occurred while processing your payment. Please try again later.");
+    bot.sendMessage(
+      chatId,
+      "❌ An error occurred while processing your payment. Please try again later."
+    );
   }
 });
 
+// /confirm command: confirms transfer and logs payout
 bot.onText(/\/confirm/, async (msg) => {
   const chatId = msg.chat.id;
 
@@ -55,17 +68,22 @@ bot.onText(/\/confirm/, async (msg) => {
 
     await bot.sendMessage(
       chatId,
-      `🔓 Username transfer confirmed.\nSending ${(0.8 * deal.amount).toFixed(4)} SOL to @${deal.seller}.`
+      `🔓 Username transfer confirmed.\nSending ${(0.8 * deal.amount).toFixed(
+        4
+      )} SOL to @${deal.seller}.`
     );
 
-    // TODO: Add payout command to wallet interface here
-
+    // TODO: Add actual payout logic here
   } catch (error) {
     console.error("Error in /confirm handler:", error);
-    bot.sendMessage(chatId, "❌ An error occurred while confirming your deal. Please try again later.");
+    bot.sendMessage(
+      chatId,
+      "❌ An error occurred while confirming your deal. Please try again later."
+    );
   }
 });
 
+// /dispute command: logs dispute
 bot.onText(/\/dispute/, async (msg) => {
   const chatId = msg.chat.id;
 
