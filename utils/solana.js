@@ -1,20 +1,29 @@
 const solanaWeb3 = require('@solana/web3.js');
 
 async function verifySolanaPayment(signature, expectedRecipient) {
-    const connection = new solanaWeb3.Connection(solanaWeb3.clusterApiUrl('mainnet-beta'), 'confirmed');
-    try {
-        const tx = await connection.getParsedTransaction(signature, 'confirmed');
-        if (!tx) return null;
+  const connection = new solanaWeb3.Connection(solanaWeb3.clusterApiUrl('mainnet-beta'), 'confirmed');
 
-        const amount = tx.meta.postBalances[1] - tx.meta.preBalances[1];
-        const sol = amount / solanaWeb3.LAMPORTS_PER_SOL;
-        const recipient = tx.transaction.message.accountKeys[1].pubkey.toString();
+  try {
+    const tx = await connection.getParsedTransaction(signature, 'confirmed');
+    if (!tx) return null;
 
-        return recipient === expectedRecipient ? sol : null;
-    } catch (error) {
-        console.error("Verification error:", error);
-        return null;
+    // Check all instructions for native SOL transfer
+    for (const instr of tx.transaction.message.instructions) {
+      if (instr.program === 'system' && instr.parsed?.type === 'transfer') {
+        const info = instr.parsed.info;
+        if (info.destination === expectedRecipient) {
+          const lamports = parseInt(info.lamports, 10);
+          const sol = lamports / solanaWeb3.LAMPORTS_PER_SOL;
+          return sol;
+        }
+      }
     }
+
+    return null; // No valid payment found to expected recipient
+  } catch (error) {
+    console.error("Verification error:", error);
+    return null;
+  }
 }
 
 module.exports = { verifySolanaPayment };
