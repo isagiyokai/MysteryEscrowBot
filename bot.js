@@ -2,97 +2,156 @@ require("dotenv").config();
 const TelegramBot = require("node-telegram-bot-api");
 const Redis = require("ioredis");
 const { verifySolanaPayment } = require("./utils/solana");
-const fs = require("fs");
 
-// Initialize Telegram bot
 const bot = new TelegramBot(process.env.TG_TOKEN, { polling: true });
+const redis = new Redis(process.env.REDIS_URL);
 
-// Connect to Redis (Upstash TLS)
-const redis = new Redis(process.env.REDIS_URL, {
-  tls: { rejectUnauthorized: false }
-});
-
-// Handle Redis connection errors
 redis.on("error", (err) => {
   console.error("Redis error:", err);
 });
 
-// /payme command: verifies Solana transaction and stores deal
+// Register Seller
+bot.onText(/\/seller (\w+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const username = match[1];
+  await redis.hset(`escrow:${username}`, "seller", chatId);
+  bot.sendMessage(chatId, `✅ Registered as seller for '${username}'.`);
+});
+
+// Register Buyer
+bot.onText(/\/buyer (\w+)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const username = match[1];
+  await redis.hset(`escrow:${username}`, "buyer", chatId);
+  bot.sendMessage(chatId, `✅ Registered as buyer for '${username}'.`);
+});
+
+// Set Agreed Price
+bot.onText(/\/agreedprice (\d+(\.\d+)?)/, async (msg, match) => {
+  const chatId = msg.chat.id;
+  const amount = parseFloat(match[1]);
+
+  const keys = await redis.keys("escrow:*");
+  for (const key of keys) {
+    const sellerId = await redis.hget(key, "seller");
+    if (parseInt(sellerId) === chatId) {
+      await redis.hset(key, "price", amount);
+      return bot.sendMessage(chatId, `💰 Agreed price set to ${amount} SOL.`);
+    }
+  }
+
+  bot.sendMessage(chatId, "❌ No active selling session found.");
+});
+
+// Confirm Username Validity
+bot.onText(/\/validityconfirmed/, async (msg) => {
+  const chatId = msg.chat.id;
+
+  const keys = await redis.keys("escrow:*");
+  for (const key of keys) {
+    const buyerId = await redis.hget(key, "buyer");
+    if (parseInt(buyerId) === chatId) {
+      const username = key.split(":")[1];
+      const sellerId = await redis.hget(key, "seller");
+      const price = await redis.hget(key, "price");
+
+      await redis.hset(key, "validity_confirmed", "true");
+      return bot.sendMessage(
+        chatId,
+        `✅ Username '${username}' confirmed. Please proceed with payment using /payme <txHash> @${username}`
+      );
+    }
+  }
+
+  bot.sendMessage(chatId, "❌ No active buying session found.");
+});
+
+// Payment Verification
 bot.onText(/\/payme (.+) @(\w+)/, async (msg, match) => {
   const chatId = msg.chat.id;
   const txHash = match[1];
-  const seller = match[2];
+  const username = match[2];
+  const key = `escrow:${username}`;
 
   try {
-    await bot.sendMessage(chatId, "⏳ Verifying your Solana transaction...");
+    const [buyerId, validity, price] = await Promise.all([
+      redis.hget(key, "buyer"),
+      redis.hget(key, "validity_confirmed"),
+      redis.hget(key, "price"),
+    ]);
 
-    const amount = await verifySolanaPayment(txHash, process.env.ADMIN_WALLET);
-
-    if (!amount) {
-      return bot.sendMessage(chatId, "❌ Invalid or failed transaction.");
+    if (parseInt(buyerId) !== chatId) {
+      return bot.sendMessage(
+        chatId,
+        "❌ You are not registered as the buyer for this transaction."
+      );
     }
 
+    if (validity !== "true") {
+      return bot.sendMessage(
+        chatId,
+        "❌ Please confirm the username validity before paying."
+      );
+    }
+
+    await bot.sendMessage(chatId, "⏳ Verifying your Solana transaction...");
+    const amount = await verifySolanaPayment(txHash, process.env.ADMIN_WALLET);
+
+    if (!amount || amount < parseFloat(price)) {
+      return bot.sendMessage(chatId, "❌ Invalid or insufficient transaction.");
+    }
+
+    const sellerId = await redis.hget(key, "seller");
     const sellerShare = (0.8 * amount).toFixed(4);
 
-    // Store deal in Redis
-    await redis.set(
-      `deal:${chatId}`,
-      JSON.stringify({ txHash, seller, amount })
-    );
+    await redis.hset(key, "txHash", txHash);
+    await redis.hset(key, "paid", amount);
 
     await bot.sendMessage(
       chatId,
-      `✅ Payment of ${amount} SOL confirmed.\n\nNow ask @${seller} to transfer the username.\nOnce done, use /confirm and send proof.`
+      `✅ Payment of ${amount} SOL confirmed.
+
+Ask @${username}'s seller to transfer the username. Once done, use /confirm to finalize.`
     );
   } catch (error) {
-    console.error("Error in /payme handler:", error);
+    console.error("/payme error:", error);
     bot.sendMessage(
       chatId,
-      "❌ An error occurred while processing your payment. Please try again later."
+      "❌ An error occurred while verifying your payment."
     );
   }
 });
 
-// /confirm command: confirms transfer and logs payout
+// Final Confirmation
 bot.onText(/\/confirm/, async (msg) => {
   const chatId = msg.chat.id;
 
-  try {
-    const dealData = await redis.get(`deal:${chatId}`);
+  const keys = await redis.keys("escrow:*");
+  for (const key of keys) {
+    const buyerId = await redis.hget(key, "buyer");
+    if (parseInt(buyerId) === chatId) {
+      const [sellerId, paid] = await Promise.all([
+        redis.hget(key, "seller"),
+        redis.hget(key, "paid"),
+      ]);
 
-    if (!dealData) {
-      return bot.sendMessage(chatId, "❌ No active deal found.");
+      await bot.sendMessage(
+        chatId,
+        `🔓 Username transfer confirmed. Releasing ${(
+          0.8 * parseFloat(paid)
+        ).toFixed(4)} SOL to seller.`
+      );
+
+      // TODO: Add payout code here
+      return;
     }
-
-    const deal = JSON.parse(dealData);
-
-    await bot.sendMessage(
-      chatId,
-      `🔓 Username transfer confirmed.\nSending ${(0.8 * deal.amount).toFixed(
-        4
-      )} SOL to @${deal.seller}.`
-    );
-
-    // TODO: Add actual payout logic here
-  } catch (error) {
-    console.error("Error in /confirm handler:", error);
-    bot.sendMessage(
-      chatId,
-      "❌ An error occurred while confirming your deal. Please try again later."
-    );
   }
+
+  bot.sendMessage(chatId, "❌ No matching deal found to confirm.");
 });
 
-// /dispute command: logs dispute
+// Dispute
 bot.onText(/\/dispute/, async (msg) => {
   const chatId = msg.chat.id;
-
-  try {
-    await bot.sendMessage(
-      chatId,
-      "⚠️ Dispute logged. Please describe your issue. We will help you shortly."
-    );
-  } catch (error) {
-    console.error("Error in /dispute handler:", error);
-  }
+  bot.sendMessage(chatId, "⚠️ Dispute logged. Please describe your issue.");
 });
