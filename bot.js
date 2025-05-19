@@ -1,98 +1,74 @@
 require("dotenv").config();
+const express = require("express");
 const TelegramBot = require("node-telegram-bot-api");
 const Redis = require("ioredis");
 const { verifySolanaPayment } = require("./utils/solana");
-const fs = require("fs");
+const app = express();
+app.use(express.json());
 
-// Initialize Telegram bot
-const bot = new TelegramBot(process.env.TG_TOKEN, { polling: true });
+const bot = new TelegramBot(process.env.TG_TOKEN, { webHook: { port: process.env.PORT || 3000 } });
+const redis = new Redis(process.env.REDIS_URL);
 
-// Connect to Redis (Upstash TLS)
-const redis = new Redis(process.env.REDIS_URL, {
-  tls: { rejectUnauthorized: false }
-});
-
-// Handle Redis connection errors
 redis.on("error", (err) => {
   console.error("Redis error:", err);
 });
 
-// /payme command: verifies Solana transaction and stores deal
-bot.onText(/\/payme (.+) @(\w+)/, async (msg, match) => {
-  const chatId = msg.chat.id;
-  const txHash = match[1];
-  const seller = match[2];
+const APP_URL = process.env.APP_URL;
+bot.setWebHook(`${APP_URL}/bot${process.env.TG_TOKEN}`);
 
-  try {
-    await bot.sendMessage(chatId, "⏳ Verifying your Solana transaction...");
-
-    const amount = await verifySolanaPayment(txHash, process.env.ADMIN_WALLET);
-
-    if (!amount) {
-      return bot.sendMessage(chatId, "❌ Invalid or failed transaction.");
-    }
-
-    const sellerShare = (0.8 * amount).toFixed(4);
-
-    // Store deal in Redis
-    await redis.set(
-      `deal:${chatId}`,
-      JSON.stringify({ txHash, seller, amount })
-    );
-
-    await bot.sendMessage(
-      chatId,
-      `✅ Payment of ${amount} SOL confirmed.\n\nNow ask @${seller} to transfer the username.\nOnce done, use /confirm and send proof.`
-    );
-  } catch (error) {
-    console.error("Error in /payme handler:", error);
-    bot.sendMessage(
-      chatId,
-      "❌ An error occurred while processing your payment. Please try again later."
-    );
-  }
+app.post(`/bot${process.env.TG_TOKEN}`, (req, res) => {
+  bot.processUpdate(req.body);
+  res.sendStatus(200);
 });
 
-// /confirm command: confirms transfer and logs payout
-bot.onText(/\/confirm/, async (msg) => {
+const funnyNames = [
+  "CryptoCornelius", "TokenTommy", "GasFeeGary", "ChainChad", "WalletWanda",
+  "DeFiDiana", "SolanaSally", "ETHElon", "LedgerLarry", "NonceNina"
+];
+
+function getRandomFunnyName() {
+  return funnyNames[Math.floor(Math.random() * funnyNames.length)] + Math.floor(Math.random() * 1000);
+}
+
+async function assignFunnyName(userId) {
+  const name = getRandomFunnyName();
+  await redis.set(`user_name_${userId}`, name);
+  return name;
+}
+
+async function getOrCreateUserName(userId) {
+  const existing = await redis.get(`user_name_${userId}`);
+  if (existing) return existing;
+  return await assignFunnyName(userId);
+}
+
+async function isVIP(userId) {
+  const txCount = await redis.get(`user_tx_count_${userId}`);
+  return parseInt(txCount || 0) >= 5; // Define VIP threshold here
+}
+
+async function incrementTransactionCount(userId) {
+  await redis.incr(`user_tx_count_${userId}`);
+}
+
+bot.onText(/\/payme/, async (msg) => {
   const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  await getOrCreateUserName(userId);
+  await incrementTransactionCount(userId);
 
-  try {
-    const dealData = await redis.get(`deal:${chatId}`);
+  const isVipUser = await isVIP(userId);
+  const feePercentage = isVipUser ? 0.005 : 0.01; // 0.5% for VIPs, 1% for others
 
-    if (!dealData) {
-      return bot.sendMessage(chatId, "❌ No active deal found.");
-    }
+  bot.sendMessage(chatId, `You're ${isVipUser ? 'a VIP 🎉' : 'not a VIP yet'} — fee is ${feePercentage * 100}%`);
 
-    const deal = JSON.parse(dealData);
-
-    await bot.sendMessage(
-      chatId,
-      `🔓 Username transfer confirmed.\nSending ${(0.8 * deal.amount).toFixed(
-        4
-      )} SOL to @${deal.seller}.`
-    );
-
-    // TODO: Add actual payout logic here
-  } catch (error) {
-    console.error("Error in /confirm handler:", error);
-    bot.sendMessage(
-      chatId,
-      "❌ An error occurred while confirming your deal. Please try again later."
-    );
-  }
+  // Proceed with the rest of the payment flow
 });
 
-// /dispute command: logs dispute
-bot.onText(/\/dispute/, async (msg) => {
+bot.onText(/\/start/, async (msg) => {
   const chatId = msg.chat.id;
+  const userId = msg.from.id;
+  const name = await getOrCreateUserName(userId);
 
-  try {
-    await bot.sendMessage(
-      chatId,
-      "⚠️ Dispute logged. Please describe your issue. We will help you shortly."
-    );
-  } catch (error) {
-    console.error("Error in /dispute handler:", error);
-  }
+  bot.sendMessage(chatId, `Welcome, ${name}! Type /payme to begin.`);
 });
