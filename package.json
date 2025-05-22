@@ -10,6 +10,6 @@
     "@solana/web3.js": "^1.73.2",
     "dotenv": "^16.3.1",
     "ioredis": "^5.3.2",
-    "node-telegram-bot-api": "^0.63.0"
+    "node-telegram-bot-api": "^0.66.0"
   }
 }
